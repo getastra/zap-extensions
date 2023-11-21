@@ -225,6 +225,27 @@ public class SstiBlindScanRule extends AbstractAppParamPlugin {
                     sendAndReceive(timedMsg, false);
                     return TimeUnit.MILLISECONDS.toSeconds(timedMsg.getTimeElapsedMillis());
                 };
+        boolean isInjectable;
+        try {
+            // use TimingUtils to detect a response to sleep payloads
+            isInjectable =
+                    TimingUtils.checkTimingDependence(
+                            BLIND_REQUEST_LIMIT,
+                            maxDelay,
+                            requestSender,
+                            TIME_CORRELATION_ERROR_RANGE,
+                            TIME_SLOPE_ERROR_RANGE);
+        } catch (Exception ex) {
+            LOGGER.debug(
+                    "Caught {} {} when accessing: {}.\n The target may have replied with a poorly formed redirect due to our input.",
+                    ex.getClass().getName(),
+                    ex.getMessage(),
+                    message.get().getRequestHeader().getURI());
+            return; 
+        }
+        if(!isInjectable) {
+            return; 
+        }
         try {
             sendAndReceive(msg, false);
             int time2secondsTest = msg.getTimeElapsedMillis();
