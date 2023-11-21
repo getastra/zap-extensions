@@ -23,21 +23,19 @@ import java.io.IOException;
 import java.net.SocketException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-
 import org.apache.commons.beanutils.ConversionException;
-import org.apache.commons.lang3.Conversion;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.parosproxy.paros.Constant;
 import org.parosproxy.paros.control.Control;
 import org.parosproxy.paros.core.scanner.AbstractAppParamPlugin;
 import org.parosproxy.paros.core.scanner.Alert;
-import org.zaproxy.zap.extension.ascanrules.timing.TimingUtils;
-import org.zaproxy.zap.extension.ruleconfig.RuleConfigParam;
 import org.parosproxy.paros.core.scanner.Category;
 import org.parosproxy.paros.core.scanner.Plugin;
 import org.parosproxy.paros.network.HttpMessage;
 import org.zaproxy.addon.oast.ExtensionOast;
+import org.zaproxy.zap.extension.ascanrules.timing.TimingUtils;
+import org.zaproxy.zap.extension.ruleconfig.RuleConfigParam;
 import org.zaproxy.zap.model.Tech;
 
 /**
@@ -218,7 +216,8 @@ public class SstiBlindScanRule extends AbstractAppParamPlugin {
                 x -> {
                     HttpMessage timedMsg = getNewMsg();
                     message.set(timedMsg);
-                    String finalPayload = payloadFormat.replace(SECONDS_PLACEHOLDER, String.valueOf(x));
+                    String finalPayload =
+                            payloadFormat.replace(SECONDS_PLACEHOLDER, String.valueOf(x));
                     setParameter(timedMsg, paramName, finalPayload);
                     LOGGER.debug("Testing [{}] = [{}]", paramName, finalPayload);
 
@@ -242,10 +241,10 @@ public class SstiBlindScanRule extends AbstractAppParamPlugin {
                     ex.getClass().getName(),
                     ex.getMessage(),
                     message.get().getRequestHeader().getURI());
-            return; 
+            return;
         }
-        if(!isInjectable) {
-            return; 
+        if (!isInjectable) {
+            return;
         }
         try {
             sendAndReceive(msg, false);
