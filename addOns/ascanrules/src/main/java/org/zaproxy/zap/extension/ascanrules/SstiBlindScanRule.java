@@ -195,7 +195,7 @@ public class SstiBlindScanRule extends AbstractAppParamPlugin {
         String payloadFormat;
         for (String sstiFormatPayload : commandExecPayloads) {
             payloadFormat = sstiFormatPayload.replace("X_COMMAND_X", "sleep X_SECONDS_X");
-            checkIfCausesTimeDelay(paramName, sstiFormatPayload);
+            checkIfCausesTimeDelay(paramName, payloadFormat);
         }
         // TODO make more requests using other ways of delaying a response
     }
@@ -207,28 +207,24 @@ public class SstiBlindScanRule extends AbstractAppParamPlugin {
      * @param payloadFormat format string that when formated with 1 argument makes a string that may
      *     cause a delay equal to the number of second inserted by the format
      */
-    private void checkIfCausesTimeDelay(String paramName, String sleepPayload) {
+    private void checkIfCausesTimeDelay(String paramName, String payloadFormat) {
 
-        String test2seconds = payloadFormat.replace(SECONDS_PLACEHOLDER, "2");
+        String test2seconds = payloadFormat.replace(SECONDS_PLACEHOLDER, String.valueOf(maxDelay));
         HttpMessage msg = getNewMsg();
         setParameter(msg, paramName, test2seconds);
         AtomicReference<HttpMessage> message = new AtomicReference<>();
-        String paramValue = sleepPayload.replace("{0}", String.valueOf(maxDelay));
-                LOGGER.debug("Trying with the value: {}", sleepPayload);
+        TimingUtils.RequestSender requestSender =
+                x -> {
+                    HttpMessage timedMsg = getNewMsg();
+                    message.set(timedMsg);
+                    String finalPayload = payloadFormat.replace(SECONDS_PLACEHOLDER, String.valueOf(x));
+                    setParameter(timedMsg, paramName, finalPayload);
+                    LOGGER.debug("Testing [{}] = [{}]", paramName, finalPayload);
 
-                TimingUtils.RequestSender requestSender =
-                        x -> {
-                            HttpMessage timedMsg = getNewMsg();
-                            message.set(timedMsg);
-                            String finalPayload =
-                                    value + sleepPayload.replace("{0}", String.valueOf(x));
-                            setParameter(timedMsg, param, finalPayload);
-                            LOGGER.debug("Testing [{}] = [{}]", param, finalPayload);
-
-                            // send the request and retrieve the response
-                            sendAndReceive(timedMsg, false);
-                            return TimeUnit.MILLISECONDS.toSeconds(timedMsg.getTimeElapsedMillis());
-                        };
+                    // send the request and retrieve the response
+                    sendAndReceive(timedMsg, false);
+                    return TimeUnit.MILLISECONDS.toSeconds(timedMsg.getTimeElapsedMillis());
+                };
         try {
             sendAndReceive(msg, false);
             int time2secondsTest = msg.getTimeElapsedMillis();
