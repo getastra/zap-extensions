@@ -22,6 +22,8 @@ package org.zaproxy.zap.extension.ascanrules;
 import java.io.IOException;
 import java.net.SocketException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import org.apache.commons.beanutils.ConversionException;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.parosproxy.paros.Constant;
@@ -32,6 +34,8 @@ import org.parosproxy.paros.core.scanner.Category;
 import org.parosproxy.paros.core.scanner.Plugin;
 import org.parosproxy.paros.network.HttpMessage;
 import org.zaproxy.addon.oast.ExtensionOast;
+import org.zaproxy.zap.extension.ascanrules.timing.TimingUtils;
+import org.zaproxy.zap.extension.ruleconfig.RuleConfigParam;
 import org.zaproxy.zap.model.Tech;
 
 /**
@@ -45,6 +49,8 @@ public class SstiBlindScanRule extends AbstractAppParamPlugin {
     private static final String MESSAGE_PREFIX = "ascanrules.sstiblind.";
 
     private static final String SECONDS_PLACEHOLDER = "X_SECONDS_X";
+
+    private static final String RULE_SLEEP_TIME = RuleConfigParam.RULE_COMMON_SLEEP_TIME;
 
     private static final float ERROR_MARGIN = 0.9f;
 
@@ -87,6 +93,13 @@ public class SstiBlindScanRule extends AbstractAppParamPlugin {
     };
 
     private static final Logger LOGGER = LogManager.getLogger(SstiBlindScanRule.class);
+
+    private int maxDelay;
+
+    private static final int BLIND_REQUEST_LIMIT = 5;
+    private static final int DEFAULT_TIME_SLEEP_SEC = 10;
+    private static final double TIME_CORRELATION_ERROR_RANGE = 0.15;
+    private static final double TIME_SLOPE_ERROR_RANGE = 0.30;
 
     @Override
     public int getId() {
@@ -131,6 +144,18 @@ public class SstiBlindScanRule extends AbstractAppParamPlugin {
     @Override
     public int getRisk() {
         return Alert.RISK_HIGH;
+    }
+
+    @Override
+    public void init() {
+        try {
+            maxDelay = this.getConfig().getInt(RULE_SLEEP_TIME, DEFAULT_TIME_SLEEP_SEC);
+        } catch (ConversionException e) {
+            LOGGER.debug(
+                    "Invalid value for '{}': {}",
+                    RULE_SLEEP_TIME,
+                    this.getConfig().getString(RULE_SLEEP_TIME));
+        }
     }
 
     @Override
@@ -183,9 +208,44 @@ public class SstiBlindScanRule extends AbstractAppParamPlugin {
      */
     private void checkIfCausesTimeDelay(String paramName, String payloadFormat) {
 
-        String test2seconds = payloadFormat.replace(SECONDS_PLACEHOLDER, "2");
+        String test2seconds = payloadFormat.replace(SECONDS_PLACEHOLDER, String.valueOf(maxDelay));
         HttpMessage msg = getNewMsg();
         setParameter(msg, paramName, test2seconds);
+        AtomicReference<HttpMessage> message = new AtomicReference<>();
+        TimingUtils.RequestSender requestSender =
+                x -> {
+                    HttpMessage timedMsg = getNewMsg();
+                    message.set(timedMsg);
+                    String finalPayload =
+                            payloadFormat.replace(SECONDS_PLACEHOLDER, String.valueOf(x));
+                    setParameter(timedMsg, paramName, finalPayload);
+                    LOGGER.debug("Testing [{}] = [{}]", paramName, finalPayload);
+
+                    // send the request and retrieve the response
+                    sendAndReceive(timedMsg, false);
+                    return TimeUnit.MILLISECONDS.toSeconds(timedMsg.getTimeElapsedMillis());
+                };
+        boolean isInjectable;
+        try {
+            // use TimingUtils to detect a response to sleep payloads
+            isInjectable =
+                    TimingUtils.checkTimingDependence(
+                            BLIND_REQUEST_LIMIT,
+                            maxDelay,
+                            requestSender,
+                            TIME_CORRELATION_ERROR_RANGE,
+                            TIME_SLOPE_ERROR_RANGE);
+        } catch (Exception ex) {
+            LOGGER.debug(
+                    "Caught {} {} when accessing: {}.\n The target may have replied with a poorly formed redirect due to our input.",
+                    ex.getClass().getName(),
+                    ex.getMessage(),
+                    message.get().getRequestHeader().getURI());
+            return;
+        }
+        if (!isInjectable) {
+            return;
+        }
         try {
             sendAndReceive(msg, false);
             int time2secondsTest = msg.getTimeElapsedMillis();
