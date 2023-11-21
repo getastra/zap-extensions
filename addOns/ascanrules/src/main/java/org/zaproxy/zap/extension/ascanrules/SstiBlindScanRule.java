@@ -22,12 +22,18 @@ package org.zaproxy.zap.extension.ascanrules;
 import java.io.IOException;
 import java.net.SocketException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+
+import org.apache.commons.beanutils.ConversionException;
+import org.apache.commons.lang3.Conversion;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.parosproxy.paros.Constant;
 import org.parosproxy.paros.control.Control;
 import org.parosproxy.paros.core.scanner.AbstractAppParamPlugin;
 import org.parosproxy.paros.core.scanner.Alert;
+import org.zaproxy.zap.extension.ascanrules.timing.TimingUtils;
+import org.zaproxy.zap.extension.ruleconfig.RuleConfigParam;
 import org.parosproxy.paros.core.scanner.Category;
 import org.parosproxy.paros.core.scanner.Plugin;
 import org.parosproxy.paros.network.HttpMessage;
@@ -45,6 +51,8 @@ public class SstiBlindScanRule extends AbstractAppParamPlugin {
     private static final String MESSAGE_PREFIX = "ascanrules.sstiblind.";
 
     private static final String SECONDS_PLACEHOLDER = "X_SECONDS_X";
+
+    private static final String RULE_SLEEP_TIME = RuleConfigParam.RULE_COMMON_SLEEP_TIME;
 
     private static final float ERROR_MARGIN = 0.9f;
 
@@ -87,6 +95,13 @@ public class SstiBlindScanRule extends AbstractAppParamPlugin {
     };
 
     private static final Logger LOGGER = LogManager.getLogger(SstiBlindScanRule.class);
+
+    private int maxDelay;
+
+    private static final int BLIND_REQUEST_LIMIT = 5;
+    private static final int DEFAULT_TIME_SLEEP_SEC = 10;
+    private static final double TIME_CORRELATION_ERROR_RANGE = 0.15;
+    private static final double TIME_SLOPE_ERROR_RANGE = 0.30;
 
     @Override
     public int getId() {
@@ -133,6 +148,17 @@ public class SstiBlindScanRule extends AbstractAppParamPlugin {
         return Alert.RISK_HIGH;
     }
 
+    public void init() {
+        try {
+            maxDelay = this.getConfig().getInt(RULE_SLEEP_TIME, DEFAULT_TIME_SLEEP_SEC);
+        } catch (ConversionException e) {
+            LOGGER.debug(
+                    "Invalid value for '{}': {}",
+                    RULE_SLEEP_TIME,
+                    this.getConfig().getString(RULE_SLEEP_TIME));
+        }
+    }
+
     @Override
     public void scan(HttpMessage msg, String paramName, String value) {
         if (inScope(Tech.JAVA)) {
@@ -169,7 +195,7 @@ public class SstiBlindScanRule extends AbstractAppParamPlugin {
         String payloadFormat;
         for (String sstiFormatPayload : commandExecPayloads) {
             payloadFormat = sstiFormatPayload.replace("X_COMMAND_X", "sleep X_SECONDS_X");
-            checkIfCausesTimeDelay(paramName, payloadFormat);
+            checkIfCausesTimeDelay(paramName, sstiFormatPayload);
         }
         // TODO make more requests using other ways of delaying a response
     }
@@ -181,11 +207,28 @@ public class SstiBlindScanRule extends AbstractAppParamPlugin {
      * @param payloadFormat format string that when formated with 1 argument makes a string that may
      *     cause a delay equal to the number of second inserted by the format
      */
-    private void checkIfCausesTimeDelay(String paramName, String payloadFormat) {
+    private void checkIfCausesTimeDelay(String paramName, String sleepPayload) {
 
         String test2seconds = payloadFormat.replace(SECONDS_PLACEHOLDER, "2");
         HttpMessage msg = getNewMsg();
         setParameter(msg, paramName, test2seconds);
+        AtomicReference<HttpMessage> message = new AtomicReference<>();
+        String paramValue = sleepPayload.replace("{0}", String.valueOf(maxDelay));
+                LOGGER.debug("Trying with the value: {}", sleepPayload);
+
+                TimingUtils.RequestSender requestSender =
+                        x -> {
+                            HttpMessage timedMsg = getNewMsg();
+                            message.set(timedMsg);
+                            String finalPayload =
+                                    value + sleepPayload.replace("{0}", String.valueOf(x));
+                            setParameter(timedMsg, param, finalPayload);
+                            LOGGER.debug("Testing [{}] = [{}]", param, finalPayload);
+
+                            // send the request and retrieve the response
+                            sendAndReceive(timedMsg, false);
+                            return TimeUnit.MILLISECONDS.toSeconds(timedMsg.getTimeElapsedMillis());
+                        };
         try {
             sendAndReceive(msg, false);
             int time2secondsTest = msg.getTimeElapsedMillis();
