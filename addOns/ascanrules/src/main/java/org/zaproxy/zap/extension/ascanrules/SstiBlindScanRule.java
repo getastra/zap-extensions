@@ -148,6 +148,7 @@ public class SstiBlindScanRule extends AbstractAppParamPlugin {
         return Alert.RISK_HIGH;
     }
 
+    @Override
     public void init() {
         try {
             maxDelay = this.getConfig().getInt(RULE_SLEEP_TIME, DEFAULT_TIME_SLEEP_SEC);
