@@ -826,7 +826,7 @@ public class SQLInjectionScanRule extends AbstractAppParamPlugin {
                                             parameter);
 
                                     // Alert the vulnerability to the main core
-                                    raiseAlert(title, parameter, reqPayload, info, tempMsg);
+                                    raiseAlert(title, parameter, reqPayload, info, origMsg);
 
                                     // Close the boundary/where iteration
                                     injectable = true;
@@ -913,7 +913,7 @@ public class SQLInjectionScanRule extends AbstractAppParamPlugin {
                                         reqPayload,
                                         parameter);
 
-                                raiseAlert(title, parameter, reqPayload, info, tempMsg);
+                                raiseAlert(title, parameter, reqPayload, info, origMsg);
 
                                 // Close the boundary/where iteration
                                 injectable = true;
