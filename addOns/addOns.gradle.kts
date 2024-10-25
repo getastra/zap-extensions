@@ -159,7 +159,7 @@ subprojects {
         releaseLink.set(project.provider { "https://github.com/zaproxy/zap-extensions/releases/${zapAddOn.addOnId.get()}-v@CURRENT_VERSION@" })
 
         manifest {
-            zapVersion.set("2.14.0")
+            zapVersion.set("2.13.0")
 
             changesFile.set(tasks.named<ConvertMarkdownToHtml>("generateManifestChanges").flatMap { it.html })
             repo.set("https://github.com/zaproxy/zap-extensions/")

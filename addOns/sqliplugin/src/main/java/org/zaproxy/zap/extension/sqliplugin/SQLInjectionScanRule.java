@@ -21,11 +21,13 @@
 package org.zaproxy.zap.extension.sqliplugin;
 
 import java.io.IOException;
+import java.net.SocketException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.apache.commons.lang3.StringUtils;
@@ -38,6 +40,7 @@ import org.parosproxy.paros.core.scanner.Category;
 import org.parosproxy.paros.network.HttpHeader;
 import org.parosproxy.paros.network.HttpMessage;
 import org.zaproxy.addon.commonlib.CommonAlertTag;
+import org.zaproxy.addon.commonlib.ResourceIdentificationUtils;
 import org.zaproxy.zap.model.Tech;
 import org.zaproxy.zap.model.TechSet;
 
@@ -61,6 +64,13 @@ public class SQLInjectionScanRule extends AbstractAppParamPlugin {
     public static final double WARN_TIME_STDEV = 0.5 * 1000;
     // Minimum time response set needed for time-comparison based on standard deviation
     public static final int MIN_TIME_RESPONSES = 10;
+
+    private static final int DEFAULT_TIME_SLEEP_SEC = 5;
+    private int sleepInSeconds = DEFAULT_TIME_SLEEP_SEC;
+    private static final int BLIND_REQUEST_LIMIT = 4;
+    // error range allowable for statistical time-based blind attacks (0-1.0)
+    private static final double TIME_CORRELATION_ERROR_RANGE = 0.15;
+    private static final double TIME_SLOPE_ERROR_RANGE = 0.30;
     // Payload used for checking of existence of IDS/WAF (dumber the better)
     // IDS_WAF_CHECK_PAYLOAD = "AND 1=1 UNION ALL SELECT 1,2,3,table_name FROM
     // information_schema.tables"
@@ -113,6 +123,9 @@ public class SQLInjectionScanRule extends AbstractAppParamPlugin {
     // Generic pattern for RandStr tag retrieval
     private static final Pattern randstrPattern = Pattern.compile("\\[RANDSTR(?:\\d+)?\\]");
 
+    private static Pattern rejectStatusCode = Pattern.compile("[3-5][0-9][0-9]");
+    private static Pattern reject400Code = Pattern.compile("4[0-9][0-9]");
+
     // Internal dynamic properties
     private final ResponseMatcher responseMatcher;
     private final List<Long> responseTimes;
@@ -134,6 +147,23 @@ public class SQLInjectionScanRule extends AbstractAppParamPlugin {
         responseMatcher = new ResponseMatcher();
         lastRequestUID = 0;
         lastErrorPageUID = -1;
+    }
+
+    private boolean statusRegex(HttpMessage msg) {
+        Matcher m =
+                rejectStatusCode.matcher(String.valueOf(msg.getResponseHeader().getStatusCode()));
+        if (m.find()) {
+            return true;
+        }
+        return false;
+    }
+
+    private boolean status400Regex(HttpMessage msg) {
+        Matcher m = reject400Code.matcher(String.valueOf(msg.getResponseHeader().getStatusCode()));
+        if (m.find()) {
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -335,6 +365,24 @@ public class SQLInjectionScanRule extends AbstractAppParamPlugin {
 
         boolean injectable;
         int injectableTechniques = 0;
+
+        try {
+            sendAndReceive(msg, false); // Send the original request
+        } catch (IOException e) {
+            return;
+        }
+
+        if (ResourceIdentificationUtils.isCss(msg)
+                || ResourceIdentificationUtils.isJavaScript(msg)
+                || ResourceIdentificationUtils.isImage(msg)
+                || ResourceIdentificationUtils.isFont(msg)) {
+            return;
+        }
+
+        // 2. not sending request if msg already returning status code from range 3** - 5**
+        if (statusRegex(msg)) {
+            return;
+        }
 
         // Maybe could be a good idea to sort tests
         // according to the behavior and the heaviness
@@ -713,7 +761,7 @@ public class SQLInjectionScanRule extends AbstractAppParamPlugin {
                             // Useful to set first matchRatio on
                             // the False response content
                             tempMsg = sendPayload(parameter, cmpPayload, true);
-                            if (tempMsg == null) {
+                            if (tempMsg == null || status400Regex(tempMsg)) {
                                 // Probably a Circular Exception occurred
                                 // exit the plugin
                                 return;
@@ -728,7 +776,7 @@ public class SQLInjectionScanRule extends AbstractAppParamPlugin {
 
                             // Perform the test's True request
                             tempMsg = sendPayload(parameter, reqPayload, true);
-                            if (tempMsg == null) {
+                            if (tempMsg == null || status400Regex(tempMsg)) {
                                 // Probably a Circular Exception occurred
                                 // exit the plugin
                                 return;
@@ -746,7 +794,7 @@ public class SQLInjectionScanRule extends AbstractAppParamPlugin {
 
                                 // Perform again the test's False request
                                 tempMsg = sendPayload(parameter, cmpPayload, true);
-                                if (tempMsg == null) {
+                                if (tempMsg == null || status400Regex(tempMsg)) {
                                     // Probably a Circular Exception occurred
                                     // exit the plugin
                                     return;
@@ -778,7 +826,7 @@ public class SQLInjectionScanRule extends AbstractAppParamPlugin {
                                             parameter);
 
                                     // Alert the vulnerability to the main core
-                                    raiseAlert(title, parameter, reqPayload, info, tempMsg);
+                                    raiseAlert(title, parameter, reqPayload, info, origMsg);
 
                                     // Close the boundary/where iteration
                                     injectable = true;
@@ -807,7 +855,7 @@ public class SQLInjectionScanRule extends AbstractAppParamPlugin {
                             // Perform the test's request and grep the response
                             // body for the test's <grep> regular expression
                             tempMsg = sendPayload(parameter, reqPayload, true);
-                            if (tempMsg == null) {
+                            if (tempMsg == null || status400Regex(tempMsg)) {
                                 // Probably a Circular Exception occurred
                                 // exit the plugin
                                 return;
@@ -865,7 +913,7 @@ public class SQLInjectionScanRule extends AbstractAppParamPlugin {
                                         reqPayload,
                                         parameter);
 
-                                raiseAlert(title, parameter, reqPayload, info, tempMsg);
+                                raiseAlert(title, parameter, reqPayload, info, origMsg);
 
                                 // Close the boundary/where iteration
                                 injectable = true;
@@ -884,86 +932,79 @@ public class SQLInjectionScanRule extends AbstractAppParamPlugin {
                             // -----------------------------------------------
                         } else if (test.getResponse().getTime() != null) {
                             // First check if we have enough sample for the test
-                            if (responseTimes.size() < MIN_TIME_RESPONSES) {
-                                // We need some dummy requests to have a correct
-                                // deviation model for this page
-                                LOGGER.warn(
-                                        "Time-based comparison needs larger statistical model: making a few dummy requests");
-
-                                do {
-                                    tempMsg = sendPayload(null, null, true);
-                                    if (tempMsg == null) {
-                                        // Probably a Circular Exception occurred
-                                        // exit the plugin
-                                        return;
-                                    }
-
-                                } while (responseTimes.size() < MIN_TIME_RESPONSES);
-                            }
-
-                            // OK now we can get the deviation of the
-                            // request computation time for this page
-                            double lowerLimit = timeSec * 1000;
-                            double deviation = getResponseTimeDeviation();
-
-                            // Minimum response time that can be even considered as delayed
-                            // MIN_VALID_DELAYED_RESPONSE = 0.5secs
-                            // lowerLimit = Math.max(MIN_VALID_DELAYED_RESPONSE, lowerLimit);
-
-                            // Get the maximum value to avoid false positives related
-                            // to slow pages that can take an average time
-                            // worse than the timeSec waiting period
-                            if (deviation >= 0) {
-                                lowerLimit =
-                                        Math.max(
-                                                lowerLimit,
-                                                getResponseTimeAverage()
-                                                        + TIME_STDEV_COEFF * deviation);
-                            }
 
                             // Perform the test's request
-                            reqPayload = setDelayValue(reqPayload);
-                            tempMsg = sendPayload(parameter, reqPayload, false);
-                            if (tempMsg == null) {
-                                // Probably a Circular Exception occurred
-                                // exit the plugin
-                                return;
-                            }
-
-                            // Check if enough time has passed
-                            if (lastResponseTime >= lowerLimit) {
-
-                                // Confirm again test's results
-                                tempMsg = sendPayload(parameter, reqPayload, false);
-                                if (tempMsg == null) {
-                                    // Probably a Circular Exception occurred
-                                    // exit the plugin
-                                    return;
-                                }
-
-                                // Check if enough time has passed
-                                if (lastResponseTime >= lowerLimit) {
-                                    // We Found IT!
-                                    // Now create the alert message
-                                    String info =
-                                            Constant.messages.getString(
-                                                    ALERT_MESSAGE_PREFIX + "info.timebased",
-                                                    reqPayload,
-                                                    lastResponseTime,
-                                                    payloadValue,
-                                                    getResponseTimeAverage());
-
+                            String currentPayload = reqPayload;
+                            AtomicReference<HttpMessage> message = new AtomicReference<>();
+                            TimingUtils.RequestSender requestSender =
+                                    x -> {
+                                        HttpMessage timedMsg = getNewMsg();
+                                        message.compareAndSet(null, timedMsg);
+                                        String finalPayload =
+                                                currentPayload.replace(
+                                                        "[SLEEPTIME]", String.valueOf(x));
+                                        setParameter(timedMsg, parameter, finalPayload);
+                                        // send the request and retrieve the response
+                                        sendAndReceive(timedMsg, false); // do not follow redirects
+                                        return timedMsg.getTimeElapsedMillis() / 1000.0;
+                                    };
+                            boolean isInjectable;
+                            try {
+                                try {
+                                    // use TimingUtils to detect a response to sleep payloads
+                                    isInjectable =
+                                            TimingUtils.checkTimingDependence(
+                                                    BLIND_REQUEST_LIMIT,
+                                                    sleepInSeconds,
+                                                    requestSender,
+                                                    TIME_CORRELATION_ERROR_RANGE,
+                                                    TIME_SLOPE_ERROR_RANGE);
+                                } catch (SocketException ex) {
                                     LOGGER.debug(
-                                            "[TIME-BASED Injection Found] {} with payload [{}] on parameter '{}'",
-                                            title,
-                                            reqPayload,
-                                            parameter);
-
-                                    raiseAlert(title, parameter, reqPayload, info, tempMsg);
-
-                                    // Close the boundary/where iteration
-                                    injectable = true;
+                                            "Caught {} {} when accessing: {}.\n The target may have replied with a poorly formed redirect due to our input.",
+                                            ex.getClass().getName(),
+                                            ex.getMessage(),
+                                            message.get().getRequestHeader().getURI());
+                                    continue; // Something went wrong, move to next blind iteration
                                 }
+
+                                if (isInjectable) {
+                                    String finalPayloadValue =
+                                            currentPayload.replace(
+                                                    "[SLEEPTIME]", String.valueOf(sleepInSeconds));
+                                    // We Found IT!
+                                    String extraInfo =
+                                            Constant.messages.getString(
+                                                    "ascanrules.sqlinjection.alert.timebased.extrainfo",
+                                                    finalPayloadValue,
+                                                    message.get().getTimeElapsedMillis(),
+                                                    parameter,
+                                                    getBaseMsg().getTimeElapsedMillis());
+                                    // String attack =
+                                    //         Constant.messages.getString(
+                                    //
+                                    // "ascanrules.sqlinjection.alert.booleanbased.attack",
+                                    //                 parameter,
+                                    //                 finalPayloadValue);
+                                    LOGGER.debug(
+                                            "[Time Based Postrgres SQL Injection - Found] on parameter [{}] with value [{}]",
+                                            parameter,
+                                            value);
+
+                                    // alerr
+                                    raiseAlert(
+                                            title,
+                                            parameter,
+                                            finalPayloadValue,
+                                            extraInfo,
+                                            message.get());
+                                }
+                            } catch (IOException ex) {
+                                LOGGER.warn(
+                                        "Time based postgres SQL Injection vulnerability check failed for parameter [{}] and payload [{}] due to an I/O error",
+                                        parameter,
+                                        value,
+                                        ex);
                             }
 
                             // -----------------------------------------------
